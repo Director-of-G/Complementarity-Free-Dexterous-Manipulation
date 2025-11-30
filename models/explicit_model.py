@@ -36,7 +36,7 @@ class ExplicitModel:
         next_qpos = cs.vertcat(next_obj_pos, next_obj_quat, next_robot_qpos)
         self.cs_qposInteg_ = cs.Function('cs_qposInte', [qpos, qvel], [next_qpos])
 
-    def init_model(self):
+    def init_model(self, beta_hparam=100.0, damp_ratio_hparam=0.1, contact_force_scale=1.0):
         curr_q = cs.SX.sym('qvel', self.param_.n_qpos_)
         cmd = cs.SX.sym('cmd', self.param_.n_cmd_)
         phi_vec = cs.SX.sym('phi_vec', self.param_.max_ncon_ * 4)
@@ -63,9 +63,10 @@ class ExplicitModel:
 
         # calculate the contact term
         # contact_force = cs.fmax(-K @ (jac_mat @ Q_inv @ b + phi_vec), 0)
-        contact_force = -model_params @ (jac_mat @ Q_inv @ b + phi_vec) - 0.1 * model_params @ jac_mat @ Q_inv @ b / h
-        beta = 100.0
+        contact_force = -model_params @ (jac_mat @ Q_inv @ b + phi_vec) - damp_ratio_hparam * model_params @ jac_mat @ Q_inv @ b / h
+        beta = beta_hparam
         contact_force = cs.log(1 + cs.exp(beta * contact_force)) / beta
+        contact_force = contact_force * contact_force_scale
         v_contact = Q_inv @ jac_mat.T @ contact_force / h
 
         # combine the velocity
@@ -76,6 +77,34 @@ class ExplicitModel:
 
         # assemble the casadi function
         self.step_once_fn = cs.Function('step_once', [curr_q, cmd, phi_vec, jac_mat, model_params], [next_qpos])
+        self.contact_force_fn = cs.Function('contact_force', [curr_q, cmd, phi_vec, jac_mat, model_params], [contact_force])
 
     def step(self, curr_q, cmd, phi_vec, jac_mat, sigma):
         return self.step_once_fn(curr_q, cmd, phi_vec, jac_mat, sigma)
+
+
+class ExplicitModelWithGrad(ExplicitModel):
+    def __init__(self, param, beta_hparam=100.0, contact_force_scale=1.0):
+        super().__init__(param)
+
+        self.init_model(beta_hparam=beta_hparam, damp_ratio_hparam=0.1, contact_force_scale=contact_force_scale)
+        self.init_grad()
+
+    def init_grad(self):
+        # symbolic inputs
+        curr_q = cs.SX.sym('qvel', self.param_.n_qpos_)
+        cmd = cs.SX.sym('cmd', self.param_.n_cmd_)
+        phi_vec = cs.SX.sym('phi_vec', self.param_.max_ncon_ * 4)
+        jac_mat = cs.SX.sym('jac_mat', self.param_.max_ncon_ * 4, self.param_.n_qvel_)
+        model_params = cs.SX.sym('sigma', 1)
+
+        # evaluate next_qpos symbolically
+        next_qpos = self.step_once_fn(curr_q, cmd, phi_vec, jac_mat, model_params)
+
+        # compute Jacobians
+        J_q = cs.jacobian(next_qpos, curr_q)
+        J_u = cs.jacobian(next_qpos, cmd)
+
+        # create callable CasADi functions
+        self.jac_q_fn = cs.Function('jac_q_fn', [curr_q, cmd, phi_vec, jac_mat, model_params], [J_q])
+        self.jac_u_fn = cs.Function('jac_u_fn', [curr_q, cmd, phi_vec, jac_mat, model_params], [J_u])

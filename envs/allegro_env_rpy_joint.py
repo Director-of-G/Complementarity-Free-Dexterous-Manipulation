@@ -24,6 +24,8 @@ class MjSimulator():
         self.break_out_signal_ = False
         self.dyn_paused_ = False
 
+        self.latest_cmd = None
+
         self.set_goal(self.param_.target_p_, self.param_.target_q_)
         self.reset_env()
 
@@ -59,10 +61,18 @@ class MjSimulator():
             self.break_out_signal_ = True
 
     def reset_env(self):
-        self.data_.qpos[:] = np.hstack((self.param_.init_robot_qpos_, self.param_.init_obj_qpos_))
-        self.data_.qvel[:] = np.zeros(22)
+        self.data_.qpos[:] = np.hstack((self.param_.init_robot_qpos_, self.param_.init_obj_qpos_[3:]))
+        self.data_.qvel[:] = np.zeros(19)
 
         mujoco.mj_forward(self.model_, self.data_)
+
+    def reset_env_with_qpos(self, robot_qpos, obj_qpos, update_gui=False):
+        self.data_.qpos[:] = np.hstack((robot_qpos, obj_qpos[3:]))
+        self.data_.qvel[:] = np.zeros(19)
+
+        mujoco.mj_forward(self.model_, self.data_)
+        if update_gui and self.viewer_ is not None:
+            self.viewer_.sync()
 
     def step(self, jpos_cmd):
         curr_jpos = self.get_jpos()
@@ -72,10 +82,25 @@ class MjSimulator():
             mujoco.mj_step(self.model_, self.data_)
             if self.viewer_ is not None:
                 self.viewer_.sync()
-            # print('error = ', np.linalg.norm(target_jpos - self.get_jpos()))
+
+        self.latest_cmd = target_jpos
+
+    def step_with_cmd_interp(self, jpos_cmd):
+        curr_jpos = self.get_jpos()
+        target_jpos = (curr_jpos + jpos_cmd)
+        interp_cmd = np.linspace(curr_jpos, target_jpos, int(1 * self.param_.frame_skip_))
+        interp_cmd = np.concatenate((interp_cmd, np.tile(target_jpos, (self.param_.frame_skip_ - int(1 * self.param_.frame_skip_), 1))), axis=0)
+        for i in range(self.param_.frame_skip_):
+            self.data_.ctrl = interp_cmd[i]
+            mujoco.mj_step(self.model_, self.data_)
+            if self.viewer_ is not None:
+                self.viewer_.sync()
+
+        self.latest_cmd = target_jpos
 
     def reset_fingers_qpos(self):
         for iter in range(self.param_.frame_skip_):
+            self.data_.qpos[0:16] = self.param_.init_robot_qpos_
             self.data_.ctrl = self.param_.init_robot_qpos_
             mujoco.mj_step(self.model_, self.data_)
             time.sleep(0.001)
@@ -83,7 +108,9 @@ class MjSimulator():
                 self.viewer_.sync()
 
     def get_state(self):
-        obj_pos = self.data_.qpos.flatten().copy()[-7:]
+        obj_position = np.array([-0.035, 0.0, 0.072])  # fix in the xml
+        obj_quat = self.data_.qpos.flatten().copy()[-4:]    # quaternion wxyz
+        obj_pos = np.hstack((obj_position, obj_quat))
         robot_pos = self.data_.qpos.flatten().copy()[0:16]
         return np.concatenate((obj_pos, robot_pos))
 
@@ -99,7 +126,7 @@ class MjSimulator():
     def set_goal(self, goal_pos=None, goal_quat=None):
         # goal_id = mujoco.mj_name2id(self.model_, mujoco.mjtObj.mjOBJ_GEOM, 'goal')
         if goal_pos is not None:
-            self.model_.body('goal').pos = goal_pos
+            self.model_.body('goal').pos = np.array([-0.035, 0.2, 0.072])
             # self.model_.geom_pos[goal_id]=goal_pos
         if goal_quat is not None:
             self.model_.body('goal').quat = goal_quat

@@ -21,11 +21,14 @@ class MPCExplicit:
         else:
             raise ValueError('Invalid model type')
 
-    def plan_once(self, target_p, target_q, curr_x, phi_vec, jac_mat, sol_guess=None):
+    def plan_once(self, target_p, target_q, curr_x, phi_vec, jac_mat, sol_guess=None, robot_qpos0=None, verbose=False):
         if sol_guess is None:
             sol_guess = dict(x0=self.nlp_w0_, lam_x0=self.nlp_lam_x0_, lam_g0=self.nlp_lam_g0_)
 
-        cost_params = cs.vvcat([target_p, target_q, phi_vec, jac_mat])
+        if robot_qpos0 is not None:
+            cost_params = cs.vvcat([target_p, target_q, phi_vec, jac_mat, robot_qpos0])
+        else:
+            cost_params = cs.vvcat([target_p, target_q, phi_vec, jac_mat])
 
         nlp_param = self.nlp_params_fn_(curr_x, phi_vec, jac_mat, cost_params, self.param_.model_params)
 
@@ -40,8 +43,10 @@ class MPCExplicit:
                                     lbx=nlp_lbw, ubx=nlp_ubw,
                                     lbg=0.0, ubg=0.0,
                                     p=nlp_param)
-        print("mpc solve time:", time.time() - st)
-        print('mpc solve status = ', self.ipopt_solver.stats()['return_status'])
+        
+        if verbose:
+            print("mpc solve time:", time.time() - st)
+            print('mpc solve status = ', self.ipopt_solver.stats()['return_status'])
 
         w_opt = raw_sol['x'].full().flatten()
         cost_opt = raw_sol['f'].full().flatten()
@@ -49,8 +54,10 @@ class MPCExplicit:
         # extract the solution from the raw solution
         sol_traj = np.reshape(w_opt, (self.param_.mpc_horizon_, -1))
         opt_u_traj = sol_traj[:, 0:self.param_.n_cmd_]
+        opt_q_traj = sol_traj[:, self.param_.n_cmd_:]
 
         return dict(action=opt_u_traj[0, :],
+                    state=opt_q_traj,
                     sol_guess=dict(x0=w_opt,
                                    lam_x0=raw_sol['lam_x'],
                                    lam_g0=raw_sol['lam_g'],
